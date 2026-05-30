@@ -44,6 +44,12 @@ export function CommunityModule() {
   const pending = data?.pending ?? [];
   const reviewed = data?.reviewed ?? [];
   const trustByUser = new Map((data?.leaderboard ?? []).map(u => [u.id, u.trustScore]));
+  const [selectedImage, setSelectedImage] = useState<{ src: string; title: string } | null>(null);
+
+  function openImage(src?: string, title?: string) {
+    if (!src) return;
+    setSelectedImage({ src, title: title ?? "Submitted photo" });
+  }
 
   function buildSignals(r: typeof pending[number]) {
     const tags: string[] = [];
@@ -96,12 +102,25 @@ export function CommunityModule() {
             {pending.map(r => {
               const signals = buildSignals(r);
               const extracted = extractInfo(r);
+              const photoSrc = r.imageUrl ?? r.imageDataUrl;
               return (
               <li key={r.id} className="px-4 py-3.5">
                 <div className="flex items-start justify-between gap-2">
                   <div className="min-w-0">
                     <div className="text-sm font-medium">{r.species}</div>
                     <div className="text-xs text-muted-foreground mt-1">{r.description}</div>
+                    {r.hasImage && photoSrc && (
+                      <button
+                        type="button"
+                        onClick={() => openImage(photoSrc, `${r.userName} · ${r.species}`)}
+                        className="mt-2 block w-full max-w-[240px] overflow-hidden rounded-md border border-border bg-panel/60 text-left"
+                      >
+                        <img src={photoSrc} alt={`${r.species} submission`} className="h-28 w-full object-cover" />
+                        <div className="px-2 py-1 text-[10px] font-mono text-muted-foreground">
+                          Click to view photo
+                        </div>
+                      </button>
+                    )}
                     <div className="mt-2 rounded-md border border-border bg-secondary/40 px-2.5 py-2 text-[11px] font-mono">
                       <div className="text-[10px] uppercase tracking-wider text-muted-foreground">AI extracted</div>
                       <div className="mt-1 flex flex-wrap gap-x-3">
@@ -174,6 +193,16 @@ export function CommunityModule() {
                     {r.reviewStatus} · {r.confidenceScore}%
                   </span>
                 </div>
+                {r.hasImage && (r.imageUrl ?? r.imageDataUrl) && (
+                  <button
+                    type="button"
+                    onClick={() => openImage(r.imageUrl ?? r.imageDataUrl, `${r.userName} · ${r.species}`)}
+                    className="mt-2 block w-full max-w-[220px] overflow-hidden rounded-md border border-border bg-panel/60 text-left"
+                  >
+                    <img src={r.imageUrl ?? r.imageDataUrl} alt={`${r.species} submission`} className="h-24 w-full object-cover" />
+                    <div className="px-2 py-1 text-[10px] font-mono text-muted-foreground">Click to view photo</div>
+                  </button>
+                )}
                 <div className="text-[11px] text-muted-foreground mt-1 font-mono flex flex-wrap gap-x-3">
                   <span>{r.userName}</span>
                   <span>{r.location}</span>
@@ -225,6 +254,29 @@ export function CommunityModule() {
           </ul>
         </div>
       </div>
+
+      {selectedImage && (
+        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4" onClick={() => setSelectedImage(null)}>
+          <div className="max-w-4xl w-full rounded-xl border border-border bg-panel shadow-2xl overflow-hidden" onClick={e => e.stopPropagation()}>
+            <div className="flex items-center justify-between gap-3 px-4 py-3 border-b border-border">
+              <div className="min-w-0">
+                <div className="text-sm font-semibold truncate">{selectedImage.title}</div>
+                <div className="text-[11px] text-muted-foreground">Submitted photo</div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setSelectedImage(null)}
+                className="text-[11px] font-mono px-2 py-1 rounded border border-border bg-secondary/60"
+              >
+                Close
+              </button>
+            </div>
+            <div className="bg-black">
+              <img src={selectedImage.src} alt={selectedImage.title} className="max-h-[78vh] w-full object-contain" />
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

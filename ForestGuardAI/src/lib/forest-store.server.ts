@@ -50,6 +50,11 @@ export type CommunityReport = {
   description: string;
   location: string;
   hasImage: boolean;
+  imageDataUrl?: string;
+  imageName?: string;
+  imageMimeType?: string;
+  imageFileName?: string;
+  imageUrl?: string;
   timestamp: string;
   confidenceScore: number;
   status: "likely_real" | "uncertain" | "likely_fake";
@@ -133,6 +138,58 @@ export function rid(prefix: string) {
 
 const KNOWN_ANIMALS = ["deer","wild_boar","rhesus_monkey","leopard","tiger","elephant","rhino","sloth_bear","peacock"];
 
+async function getReportImagesRoot(): Promise<string> {
+  const [{ mkdir }, path] = await Promise.all([
+    import("node:fs/promises"),
+    import("node:path"),
+  ]);
+  const configured = typeof process !== "undefined" ? process.env?.REPORT_IMAGES_DIR : undefined;
+  const root = configured
+    ? path.resolve(configured)
+    : path.resolve(process.cwd(), "report_images");
+  await mkdir(root, { recursive: true });
+  return root;
+}
+
+function guessReportImageExtension(imageName?: string, mimeType?: string): string {
+  const lowerName = (imageName ?? "").toLowerCase();
+  if (lowerName.endsWith(".png")) return ".png";
+  if (lowerName.endsWith(".webp")) return ".webp";
+  if (lowerName.endsWith(".jpg") || lowerName.endsWith(".jpeg")) return ".jpg";
+  if (mimeType === "image/png") return ".png";
+  if (mimeType === "image/webp") return ".webp";
+  return ".jpg";
+}
+
+async function persistReportImage(reportId: string, input: {
+  imageDataUrl?: string;
+  imageName?: string;
+  imageMimeType?: string;
+}): Promise<{ imageFileName?: string; imageUrl?: string; imageMimeType?: string }> {
+  if (!input.imageDataUrl) return {};
+
+  const match = input.imageDataUrl.match(/^data:([^;]+);base64,(.+)$/);
+  if (!match) return {};
+
+  const [, detectedMime, base64Data] = match;
+  const mimeType = input.imageMimeType ?? detectedMime ?? "image/jpeg";
+  const ext = guessReportImageExtension(input.imageName, mimeType);
+  const imageFileName = `${reportId}${ext}`;
+  const root = await getReportImagesRoot();
+  const [{ writeFile }, path] = await Promise.all([
+    import("node:fs/promises"),
+    import("node:path"),
+  ]);
+
+  await writeFile(path.join(root, imageFileName), Buffer.from(base64Data, "base64"));
+
+  return {
+    imageFileName,
+    imageUrl: `/api/report-images/file?id=${encodeURIComponent(reportId)}`,
+    imageMimeType: mimeType,
+  };
+}
+
 export function ingestCameraData(input: {
   camera_id: string;
   timestamp?: string;
@@ -211,10 +268,13 @@ export function ingestCameraData(input: {
   return { ok: true, event: ev };
 }
 
-export function verifyReport(input: {
+export async function verifyReport(input: {
   userId: string; userName: string; species: string;
   description: string; location: string; hasImage: boolean;
-}): CommunityReport {
+  imageDataUrl?: string;
+  imageName?: string;
+  imageMimeType?: string;
+}): Promise<CommunityReport> {
   const s = getStore();
   const user = s.users.get(input.userId) ?? { id: input.userId, name: input.userName, points: 0, reportsCount: 0, trustScore: 50 };
   let score = 40;
@@ -228,12 +288,25 @@ export function verifyReport(input: {
   const aiSuggestion: CommunityReport["aiSuggestion"] = score >= 60 ? "approve" : "reject";
   user.reportsCount += 1;
   s.users.set(user.id, user);
+  const reportId = rid("r");
   const report: CommunityReport = {
-    id: rid("r"), userId: user.id, userName: user.name, species: input.species,
+    id: reportId, userId: user.id, userName: user.name, species: input.species,
     description: input.description, location: input.location, hasImage: input.hasImage,
+    imageDataUrl: input.imageDataUrl,
+    imageName: input.imageName,
+    imageMimeType: input.imageMimeType,
     timestamp: new Date().toISOString(), confidenceScore: score, status, aiSuggestion,
     reviewStatus: "pending", pointsAwarded: 0,
   };
+
+  const persistedImage = await persistReportImage(report.id, input);
+  report.imageFileName = persistedImage.imageFileName;
+  report.imageUrl = persistedImage.imageUrl;
+  report.imageMimeType = persistedImage.imageMimeType;
+  if (persistedImage.imageUrl) {
+    report.imageDataUrl = undefined;
+  }
+
   s.reports.unshift(report);
   if (s.reports.length > 100) s.reports.length = 100;
   return report;

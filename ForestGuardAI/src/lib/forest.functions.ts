@@ -8,6 +8,95 @@ import {
   type Detection,
 } from "./forest-store.server";
 
+type CapturedImage = {
+  id: string;
+  species: string;
+  filename: string;
+  url: string;
+  capturedAt?: string;
+  confidence?: number;
+};
+
+async function getCapturedImagesRoot(): Promise<string | null> {
+  const [{ stat }, path] = await Promise.all([
+    import("node:fs/promises"),
+    import("node:path"),
+  ]);
+  const configured = typeof process !== "undefined" ? process.env?.CAPTURED_IMAGES_DIR : undefined;
+  const candidates = [
+    configured,
+    path.resolve(process.cwd(), "../android-agent/images_captured"),
+    path.resolve(process.cwd(), "android-agent/images_captured"),
+    path.resolve(process.cwd(), "../images_captured"),
+    path.resolve(process.cwd(), "../../android-agent/images_captured"),
+  ].filter(Boolean) as string[];
+
+  for (const candidate of candidates) {
+    try {
+      const info = await stat(candidate);
+      if (info.isDirectory()) return path.resolve(candidate);
+    } catch {
+      // Try the next likely local project layout.
+    }
+  }
+  return null;
+}
+
+function parseCapturedImageMeta(filename: string): Pick<CapturedImage, "capturedAt" | "confidence"> {
+  const match = filename.match(/_(\d{8})_(\d{6})_(\d{3})_conf(\d+)\.(?:jpe?g|png|webp)$/i);
+  if (!match) return {};
+  const [, date, time, millis, conf] = match;
+  const capturedAt = new Date(
+    Number(date.slice(0, 4)),
+    Number(date.slice(4, 6)) - 1,
+    Number(date.slice(6, 8)),
+    Number(time.slice(0, 2)),
+    Number(time.slice(2, 4)),
+    Number(time.slice(4, 6)),
+    Number(millis),
+  ).toISOString();
+  return { capturedAt, confidence: Number(conf) };
+}
+
+export const getCapturedImages = createServerFn({ method: "GET" }).handler(async () => {
+  const [{ readdir, stat }, path] = await Promise.all([
+    import("node:fs/promises"),
+    import("node:path"),
+  ]);
+  const root = await getCapturedImagesRoot();
+  if (!root) return { root: null as string | null, images: [] as CapturedImage[] };
+
+  const speciesDirs = await readdir(root, { withFileTypes: true });
+  const images: CapturedImage[] = [];
+
+  for (const dir of speciesDirs) {
+    if (!dir.isDirectory()) continue;
+    const species = dir.name;
+    const dirPath = path.join(root, species);
+    const files = await readdir(dirPath, { withFileTypes: true });
+    for (const file of files) {
+      if (!file.isFile() || !/\.(jpe?g|png|webp)$/i.test(file.name)) continue;
+      const filePath = path.join(dirPath, file.name);
+      const info = await stat(filePath);
+      const id = encodeURIComponent(`${species}/${file.name}`);
+      const meta = parseCapturedImageMeta(file.name);
+      images.push({
+        id,
+        species,
+        filename: file.name,
+        url: `/api/captured-images/file?id=${id}`,
+        capturedAt: meta.capturedAt ?? info.mtime.toISOString(),
+        confidence: meta.confidence,
+      });
+    }
+  }
+
+  return {
+    root,
+    images: images.sort((a, b) => new Date(b.capturedAt ?? 0).getTime() - new Date(a.capturedAt ?? 0).getTime()),
+  };
+});
+
 export const postCameraData = createServerFn({ method: "POST" })
   .inputValidator((d: {
     camera_id: string;
@@ -23,8 +112,11 @@ export const postCommunityReport = createServerFn({ method: "POST" })
   .inputValidator((d: {
     userId: string; userName: string; species: string;
     description: string; location: string; hasImage: boolean;
+    imageDataUrl?: string;
+    imageName?: string;
+    imageMimeType?: string;
   }) => d)
-  .handler(async ({ data }) => verifyReport(data));
+  .handler(async ({ data }) => await verifyReport(data));
 
 export const reviewCommunityReport = createServerFn({ method: "POST" })
   .inputValidator((d: { id: string; decision: "approve" | "reject"; officialName?: string }) => d)

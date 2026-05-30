@@ -2,7 +2,7 @@ import "./lib/error-capture";
 
 import { consumeLastCapturedError } from "./lib/error-capture";
 import { renderErrorPage } from "./lib/error-page";
-import { ingestCameraData } from "./lib/forest-store.server";
+import { ingestCameraData, getStore } from "./lib/forest-store.server";
 
 type ServerEntry = {
   fetch: (request: Request, env: unknown, ctx: unknown) => Promise<Response> | Response;
@@ -152,6 +152,304 @@ async function handleEvents(request: Request): Promise<Response> {
   if (cameraId) events = events.filter(e => e.cameraId === cameraId);
   return json(events.slice(0, limit));
 }
+
+type CapturedImage = {
+  id: string;
+  species: string;
+  filename: string;
+  url: string;
+  capturedAt?: string;
+  confidence?: number;
+};
+
+async function getCapturedImagesRoot(): Promise<string | null> {
+  const [{ stat }, path] = await Promise.all([
+    import("node:fs/promises"),
+    import("node:path"),
+  ]);
+  const configured = typeof process !== "undefined" ? process.env?.CAPTURED_IMAGES_DIR : undefined;
+  const candidates = [
+    configured,
+    path.resolve(process.cwd(), "../android-agent/images_captured"),
+    path.resolve(process.cwd(), "android-agent/images_captured"),
+    path.resolve(process.cwd(), "../images_captured"),
+    path.resolve(process.cwd(), "../../android-agent/images_captured"),
+  ].filter(Boolean) as string[];
+
+  for (const candidate of candidates) {
+    try {
+      const info = await stat(candidate);
+      if (info.isDirectory()) return path.resolve(candidate);
+    } catch {
+      // Try the next likely local project layout.
+    }
+  }
+  return null;
+}
+
+function parseCapturedImageMeta(filename: string): Pick<CapturedImage, "capturedAt" | "confidence"> {
+  const match = filename.match(/_(\d{8})_(\d{6})_(\d{3})_conf(\d+)\.(?:jpe?g|png|webp)$/i);
+  if (!match) return {};
+  const [, date, time, millis, conf] = match;
+  const capturedAt = new Date(
+    Number(date.slice(0, 4)),
+    Number(date.slice(4, 6)) - 1,
+    Number(date.slice(6, 8)),
+    Number(time.slice(0, 2)),
+    Number(time.slice(2, 4)),
+    Number(time.slice(4, 6)),
+    Number(millis),
+  ).toISOString();
+  return { capturedAt, confidence: Number(conf) };
+}
+
+async function listCapturedImages(root: string): Promise<CapturedImage[]> {
+  const [{ readdir, stat }, path] = await Promise.all([
+    import("node:fs/promises"),
+    import("node:path"),
+  ]);
+  const speciesDirs = await readdir(root, { withFileTypes: true });
+  const images: CapturedImage[] = [];
+
+  for (const dir of speciesDirs) {
+    if (!dir.isDirectory()) continue;
+    const species = dir.name;
+    const dirPath = path.join(root, species);
+    const files = await readdir(dirPath, { withFileTypes: true });
+    for (const file of files) {
+      if (!file.isFile() || !/\.(jpe?g|png|webp)$/i.test(file.name)) continue;
+      const filePath = path.join(dirPath, file.name);
+      const info = await stat(filePath);
+      const id = encodeURIComponent(`${species}/${file.name}`);
+      const meta = parseCapturedImageMeta(file.name);
+      images.push({
+        id,
+        species,
+        filename: file.name,
+        url: `/api/captured-images/file?id=${id}`,
+        capturedAt: meta.capturedAt ?? info.mtime.toISOString(),
+        confidence: meta.confidence,
+      });
+    }
+  }
+
+  return images.sort((a, b) => new Date(b.capturedAt ?? 0).getTime() - new Date(a.capturedAt ?? 0).getTime());
+}
+
+async function handleCapturedImages(request: Request): Promise<Response> {
+  const json = (body: unknown, status = 200) =>
+    new Response(JSON.stringify(body), {
+      status,
+      headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" },
+    });
+
+  if (request.method !== "GET") return json({ error: "Method not allowed" }, 405);
+
+  const root = await getCapturedImagesRoot();
+  if (!root) return json({ root: null, images: [] });
+
+  try {
+    const images = await listCapturedImages(root);
+    return json({ root, images });
+  } catch (err) {
+    console.error("[/api/captured-images] error:", err);
+    return json({ error: "Unable to read captured images", images: [] }, 500);
+  }
+}
+
+async function handleCapturedImageFile(request: Request): Promise<Response> {
+  if (request.method !== "GET") {
+    return new Response(JSON.stringify({ error: "Method not allowed" }), {
+      status: 405,
+      headers: { "Content-Type": "application/json" },
+    });
+  }
+
+  const [{ readFile, stat }, path] = await Promise.all([
+    import("node:fs/promises"),
+    import("node:path"),
+  ]);
+  const root = await getCapturedImagesRoot();
+  if (!root) return new Response("Captured images folder not found", { status: 404 });
+
+  const url = new URL(request.url);
+  const id = url.searchParams.get("id");
+  if (!id) return new Response("Missing image id", { status: 400 });
+
+  const [species, filename] = decodeURIComponent(id).split("/");
+  if (!species || !filename || species.includes("..") || filename.includes("..")) {
+    return new Response("Invalid image id", { status: 400 });
+  }
+
+  const filePath = path.resolve(root, species, filename);
+  const rootWithSep = root.endsWith(path.sep) ? root : `${root}${path.sep}`;
+  if (!filePath.startsWith(rootWithSep)) {
+    return new Response("Invalid image path", { status: 400 });
+  }
+
+  try {
+    const info = await stat(filePath);
+    if (!info.isFile()) return new Response("Not found", { status: 404 });
+    const bytes = await readFile(filePath);
+    const ext = path.extname(filename).toLowerCase();
+    const type = ext === ".png" ? "image/png" : ext === ".webp" ? "image/webp" : "image/jpeg";
+    return new Response(bytes, {
+      headers: {
+        "Content-Type": type,
+        "Cache-Control": "no-store",
+        "Access-Control-Allow-Origin": "*",
+      },
+    });
+  } catch {
+    return new Response("Not found", { status: 404 });
+  }
+}
+
+async function handleClassifyImage(request: Request): Promise<Response> {
+  const json = (body: unknown, status = 200) =>
+    new Response(JSON.stringify(body), {
+      status,
+      headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" },
+    });
+
+  if (request.method === "OPTIONS") {
+    return new Response(null, {
+      status: 204,
+      headers: {
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Methods": "POST, OPTIONS",
+        "Access-Control-Allow-Headers": "Content-Type",
+      },
+    });
+  }
+
+  if (request.method !== "POST") return json({ error: "Method not allowed" }, 405);
+
+  let tempDir: string | null = null;
+  let fsPromises: typeof import("node:fs/promises") | null = null;
+
+  try {
+    const form = await request.formData();
+    const file = form.get("image");
+    if (!(file instanceof File)) {
+      return json({ error: "Missing image file" }, 400);
+    }
+
+    const lowerName = file.name.toLowerCase();
+    const ext = lowerName.endsWith(".png") ? ".png" : lowerName.endsWith(".webp") ? ".webp" : ".jpg";
+
+    const [fs, os, path, child] = await Promise.all([
+      import("node:fs/promises"),
+      import("node:os"),
+      import("node:path"),
+      import("node:child_process"),
+    ]);
+    fsPromises = fs;
+
+    tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "fg-upload-"));
+    const tempPath = path.join(tempDir, `upload${ext}`);
+    const bytes = Buffer.from(await file.arrayBuffer());
+    await fs.writeFile(tempPath, bytes);
+
+    const scriptPath = path.resolve(process.cwd(), "../android-agent/classify_upload.py");
+    const modelPath = path.resolve(process.cwd(), "ml/model/best.pt");
+    const pythonBin = process.env.PYTHON_BIN || "python";
+
+    const output = await new Promise<string>((resolve, reject) => {
+      const proc = child.spawn(pythonBin, [scriptPath, tempPath], {
+        cwd: path.resolve(process.cwd(), "../android-agent"),
+        env: {
+          ...process.env,
+          MODEL_PATH: modelPath,
+        },
+      });
+
+      let stdout = "";
+      let stderr = "";
+      proc.stdout.on("data", (chunk) => {
+        stdout += String(chunk);
+      });
+      proc.stderr.on("data", (chunk) => {
+        stderr += String(chunk);
+      });
+      proc.on("error", reject);
+      proc.on("close", (code) => {
+        if (code === 0) return resolve(stdout.trim());
+        reject(new Error(`classification_process_failed(${code}): ${stderr || stdout}`));
+      });
+    });
+
+    const parsed = JSON.parse(output) as {
+      ok: boolean;
+      labels: string[];
+      topLabel: string | null;
+      topConfidence: number | null;
+      detections: Array<{ label: string; confidence: number }>;
+      error?: string;
+      message?: string;
+    };
+
+    if (!parsed.ok) {
+      return json({ error: parsed.error ?? "classification_failed", message: parsed.message }, 500);
+    }
+
+    return json(parsed);
+  } catch (err) {
+    console.error("[/api/classify-image] error:", err);
+    return json({ error: "Unable to classify image" }, 500);
+  } finally {
+    if (tempDir && fsPromises) {
+      await fsPromises.rm(tempDir, { recursive: true, force: true }).catch(() => undefined);
+    }
+  }
+}
+
+async function handleReportImageFile(request: Request): Promise<Response> {
+  if (request.method !== "GET") {
+    return new Response(JSON.stringify({ error: "Method not allowed" }), {
+      status: 405,
+      headers: { "Content-Type": "application/json" },
+    });
+  }
+
+  const [{ readFile, stat }, path] = await Promise.all([
+    import("node:fs/promises"),
+    import("node:path"),
+  ]);
+
+  const url = new URL(request.url);
+  const id = url.searchParams.get("id");
+  if (!id) return new Response("Missing report id", { status: 400 });
+
+  const report = getStore().reports.find((entry) => entry.id === id);
+  if (!report?.imageFileName) return new Response("Not found", { status: 404 });
+
+  const configured = typeof process !== "undefined" ? process.env?.REPORT_IMAGES_DIR : undefined;
+  const root = configured
+    ? path.resolve(configured)
+    : path.resolve(process.cwd(), "report_images");
+  const filePath = path.resolve(root, report.imageFileName);
+  const rootWithSep = root.endsWith(path.sep) ? root : `${root}${path.sep}`;
+  if (!filePath.startsWith(rootWithSep)) {
+    return new Response("Invalid image path", { status: 400 });
+  }
+
+  try {
+    const info = await stat(filePath);
+    if (!info.isFile()) return new Response("Not found", { status: 404 });
+    const bytes = await readFile(filePath);
+    const type = report.imageMimeType ?? (path.extname(filePath).toLowerCase() === ".png" ? "image/png" : path.extname(filePath).toLowerCase() === ".webp" ? "image/webp" : "image/jpeg");
+    return new Response(bytes, {
+      headers: {
+        "Content-Type": type,
+        "Cache-Control": "no-store",
+        "Access-Control-Allow-Origin": "*",
+      },
+    });
+  } catch {
+    return new Response("Not found", { status: 404 });
+  }
+}
 // ─────────────────────────────────────────────────────────────────────────────
 
 export default {
@@ -164,6 +462,18 @@ export default {
     }
     if (url.pathname === "/api/events") {
       return handleEvents(request);
+    }
+    if (url.pathname === "/api/captured-images") {
+      return handleCapturedImages(request);
+    }
+    if (url.pathname === "/api/captured-images/file") {
+      return handleCapturedImageFile(request);
+    }
+    if (url.pathname === "/api/report-images/file") {
+      return handleReportImageFile(request);
+    }
+    if (url.pathname === "/api/classify-image") {
+      return handleClassifyImage(request);
     }
 
     try {

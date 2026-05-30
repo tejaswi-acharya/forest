@@ -2,7 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
 import { useServerFn } from "@tanstack/react-start";
 import {
-  getDashboardSummary, getAlerts, getCameras, getRecentEvents, getCommunity, resolveAlert,
+  getDashboardSummary, getAlerts, getCameras, getRecentEvents, getCommunity, resolveAlert, getCapturedImages,
 } from "@/lib/forest.functions";
 
 export function StatCard({
@@ -48,6 +48,147 @@ function formatDuration(ms: number) {
   if (m < 60) return `${m}m`;
   const h = Math.round(m / 60);
   return `${h}h`;
+}
+
+function formatImageTime(iso?: string) {
+  if (!iso) return "Unknown time";
+  return new Date(iso).toLocaleString([], {
+    month: "short",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+type UploadClassificationResponse = {
+  ok: boolean;
+  labels: string[];
+  topLabel: string | null;
+  topConfidence: number | null;
+  detections: Array<{ label: string; confidence: number }>;
+  error?: string;
+  message?: string;
+};
+
+function prettySpeciesName(label: string) {
+  return label.replace(/_/g, " ");
+}
+
+export function UploadClassifierPanel() {
+  const [file, setFile] = useState<File | null>(null);
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [result, setResult] = useState<UploadClassificationResponse | null>(null);
+
+  const onChooseFile = (nextFile: File | null) => {
+    setFile(nextFile);
+    setResult(null);
+    setError(null);
+    if (previewUrl) URL.revokeObjectURL(previewUrl);
+    if (nextFile) setPreviewUrl(URL.createObjectURL(nextFile));
+    else setPreviewUrl(null);
+  };
+
+  const classify = async () => {
+    if (!file) return;
+    setLoading(true);
+    setError(null);
+    setResult(null);
+    try {
+      const formData = new FormData();
+      formData.append("image", file);
+      const response = await fetch("/api/classify-image", {
+        method: "POST",
+        body: formData,
+      });
+      const body = await response.json() as UploadClassificationResponse;
+      if (!response.ok || !body.ok) {
+        setError(body.error ?? body.message ?? "Classification failed");
+        return;
+      }
+      setResult(body);
+    } catch {
+      setError("Could not classify image. Make sure the Python environment is ready.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="panel overflow-hidden">
+      <div className="px-4 py-3 border-b border-border">
+        <h3 className="text-sm font-semibold">Upload & Classify (best.pt)</h3>
+        <p className="text-[11px] text-muted-foreground mt-0.5">
+          Upload an image and run the same fine-tuned YOLO model to classify into 8 wildlife labels.
+        </p>
+      </div>
+
+      <div className="p-4 grid grid-cols-1 lg:grid-cols-2 gap-4">
+        <div className="space-y-3">
+          <input
+            type="file"
+            accept="image/png,image/jpeg,image/webp"
+            onChange={(event) => onChooseFile(event.target.files?.[0] ?? null)}
+            className="block w-full text-xs file:mr-3 file:px-3 file:py-1.5 file:rounded-md file:border file:border-border file:bg-secondary/70 file:text-foreground"
+          />
+          <button
+            type="button"
+            disabled={!file || loading}
+            onClick={classify}
+            className="text-[11px] font-mono px-3 py-1.5 rounded-md border border-primary/40 bg-primary/15 text-primary disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            {loading ? "Classifying..." : "Run YOLO Classification"}
+          </button>
+          {error && <div className="text-xs text-critical-foreground">{error}</div>}
+
+          <div className="text-[11px] text-muted-foreground">
+            Labels: deer, elephant, leopard, rhesus_monkey, peacock, rhino, tiger, wild_boar
+          </div>
+        </div>
+
+        <div className="rounded-lg border border-border bg-secondary/20 overflow-hidden min-h-[220px]">
+          {previewUrl ? (
+            <img src={previewUrl} alt="Upload preview" className="w-full h-full object-cover" />
+          ) : (
+            <div className="h-full min-h-[220px] grid place-items-center text-xs text-muted-foreground">
+              Image preview appears here
+            </div>
+          )}
+        </div>
+      </div>
+
+      {result && (
+        <div className="px-4 pb-4">
+          <div className="rounded-md border border-border bg-secondary/20 p-3 space-y-2">
+            <div className="text-xs text-muted-foreground">Top prediction</div>
+            <div className="text-sm font-semibold capitalize">
+              {result.topLabel ? prettySpeciesName(result.topLabel) : "No target species detected"}
+              {typeof result.topConfidence === "number" && (
+                <span className="ml-2 text-xs font-mono text-primary">
+                  {Math.round(result.topConfidence * 100)}%
+                </span>
+              )}
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+              {result.detections.map((detection) => (
+                <div
+                  key={detection.label}
+                  className="flex items-center justify-between rounded border border-border bg-panel/60 px-2 py-1 text-xs"
+                >
+                  <span className="capitalize">{prettySpeciesName(detection.label)}</span>
+                  <span className="font-mono text-primary">{Math.round(detection.confidence * 100)}%</span>
+                </div>
+              ))}
+              {result.detections.length === 0 && (
+                <div className="text-xs text-muted-foreground">No detections matched the 8 configured labels.</div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
 }
 
 type FeedPreset = {
@@ -208,6 +349,12 @@ export function StatsRow() {
   const reviewed = community?.reviewed ?? [];
   const payoutPoints = reviewed.filter(r => r.reviewStatus === "approved")
     .reduce((sum, r) => sum + r.pointsAwarded, 0);
+  const [selectedImage, setSelectedImage] = useState<{ src: string; title: string } | null>(null);
+
+  function openImage(src?: string, title?: string) {
+    if (!src) return;
+    setSelectedImage({ src, title: title ?? "Submitted photo" });
+  }
 
   return (
     <div className="space-y-3">
@@ -483,9 +630,33 @@ export function StatsRow() {
                 <div className="space-y-2">
                   {pending.slice(0, 5).map(r => (
                     <div key={r.id} className="rounded-md border border-border bg-secondary/40 px-3 py-2 flex items-center justify-between gap-3">
-                      <div className="min-w-0">
-                        <div className="text-sm font-medium truncate">{r.species}</div>
-                        <div className="text-[11px] font-mono text-muted-foreground truncate">{r.userName} · {r.location}</div>
+                      <div className="min-w-0 flex items-center gap-3">
+                        {r.hasImage && (r.imageUrl ?? r.imageDataUrl) ? (
+                          <button
+                            type="button"
+                            onClick={() => openImage(r.imageUrl ?? r.imageDataUrl, `${r.userName} · ${r.species}`)}
+                            className="relative size-14 overflow-hidden rounded-md border border-border bg-black/20 shrink-0"
+                          >
+                            <img src={r.imageUrl ?? r.imageDataUrl} alt={`${r.species} submission`} className="h-full w-full object-cover" />
+                          </button>
+                        ) : (
+                          <div className="size-14 rounded-md border border-border bg-panel/60 grid place-items-center text-[10px] font-mono text-muted-foreground shrink-0">
+                            no photo
+                          </div>
+                        )}
+                        <div className="min-w-0">
+                          <div className="text-sm font-medium truncate">{r.species}</div>
+                          <div className="text-[11px] font-mono text-muted-foreground truncate">{r.userName} · {r.location}</div>
+                          {r.hasImage && (r.imageUrl ?? r.imageDataUrl) && (
+                            <button
+                              type="button"
+                              onClick={() => openImage(r.imageUrl ?? r.imageDataUrl, `${r.userName} · ${r.species}`)}
+                              className="mt-1 text-[10px] font-mono text-primary hover:underline"
+                            >
+                              View submitted photo
+                            </button>
+                          )}
+                        </div>
                       </div>
                       <span className={`text-[10px] uppercase font-mono px-1.5 py-0.5 rounded border ${
                         r.status === "likely_real" ? "border-primary/40 bg-primary/10 text-primary" :
@@ -502,9 +673,124 @@ export function StatsRow() {
           )}
         </div>
       )}
+
+      {selectedImage && (
+        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4" onClick={() => setSelectedImage(null)}>
+          <div className="max-w-4xl w-full rounded-xl border border-border bg-panel shadow-2xl overflow-hidden" onClick={e => e.stopPropagation()}>
+            <div className="flex items-center justify-between gap-3 px-4 py-3 border-b border-border">
+              <div className="min-w-0">
+                <div className="text-sm font-semibold truncate">{selectedImage.title}</div>
+                <div className="text-[11px] text-muted-foreground">Submitted photo</div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setSelectedImage(null)}
+                className="text-[11px] font-mono px-2 py-1 rounded border border-border bg-secondary/60"
+              >
+                Close
+              </button>
+            </div>
+            <div className="bg-black">
+              <img src={selectedImage.src} alt={selectedImage.title} className="max-h-[78vh] w-full object-contain" />
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
+
+type CapturedImage = {
+  id: string;
+  species: string;
+  filename: string;
+  url: string;
+  capturedAt?: string;
+  confidence?: number;
+};
+
+export function CapturedImagesGallery() {
+  const fn = useServerFn(getCapturedImages);
+  const { data, isLoading, isError } = useQuery({
+    queryKey: ["captured-images"],
+    queryFn: () => fn(),
+    refetchInterval: 7000,
+  });
+
+  const images = (data?.images ?? []) as CapturedImage[];
+
+  return (
+    <div className="panel overflow-hidden">
+      <div className="px-4 py-3 border-b border-border flex items-center justify-between gap-3 flex-wrap">
+        <div>
+          <h3 className="text-sm font-semibold">Captured Images</h3>
+          <p className="text-[11px] text-muted-foreground mt-0.5">
+            Latest files from the saved capture folder, loaded directly into the dashboard.
+          </p>
+        </div>
+        <span className="text-[11px] font-mono text-muted-foreground">
+          {data?.root ? `${images.length} saved` : "Folder not found"}
+        </span>
+      </div>
+
+      {isLoading && (
+        <div className="px-4 py-8 text-sm text-muted-foreground">Loading saved captures…</div>
+      )}
+
+      {isError && (
+        <div className="px-4 py-8 text-sm text-muted-foreground">
+          Unable to load saved captures right now.
+        </div>
+      )}
+
+      {!isLoading && !isError && images.length === 0 && (
+        <div className="px-4 py-8 text-sm text-muted-foreground">
+          No saved images were found in the capture folder yet.
+        </div>
+      )}
+
+      {images.length > 0 && (
+        <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-3 p-4">
+          {images.slice(0, 12).map(image => (
+            <a
+              key={image.id}
+              href={image.url}
+              target="_blank"
+              rel="noreferrer"
+              className="group rounded-lg border border-border bg-secondary/30 overflow-hidden hover:border-primary/40 hover:bg-secondary/50 transition-colors"
+            >
+              <div className="aspect-video bg-black/40 overflow-hidden">
+                <img
+                  src={`${image.url}&v=${encodeURIComponent(image.capturedAt ?? image.filename)}`}
+                  alt={`${image.species} capture`}
+                  className="h-full w-full object-cover transition-transform duration-300 group-hover:scale-[1.02]"
+                  loading="lazy"
+                />
+              </div>
+              <div className="p-3 space-y-1.5">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="text-sm font-medium capitalize truncate">{image.species.replace(/_/g, " ")}</div>
+                  {typeof image.confidence === "number" && (
+                    <span className="text-[10px] font-mono px-1.5 py-0.5 rounded border border-primary/30 bg-primary/10 text-primary">
+                      {image.confidence}%
+                    </span>
+                  )}
+                </div>
+                <div className="text-[11px] font-mono text-muted-foreground truncate">{image.filename}</div>
+                <div className="flex items-center justify-between gap-2 text-[11px] text-muted-foreground">
+                  <span>{formatImageTime(image.capturedAt)}</span>
+                  <span className="text-primary font-medium">Open</span>
+                </div>
+              </div>
+            </a>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+export const CapturedImagesPanel = CapturedImagesGallery;
 
 export function AlertsPanel({ limit = 8 }: { limit?: number }) {
   const fn = useServerFn(getAlerts);

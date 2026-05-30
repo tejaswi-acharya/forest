@@ -1,7 +1,7 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useServerFn } from "@tanstack/react-start";
 import { Link } from "@tanstack/react-router";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { getCitizenView, postCommunityReport } from "@/lib/forest.functions";
 
 const USERS = [
@@ -24,6 +24,31 @@ const reviewLabel = (s: "pending" | "approved" | "rejected") =>
   s === "rejected" ? { txt: "Rejected by officer", cls: "text-rose-300 bg-rose-500/15 border-rose-500/30" } :
   { txt: "Under officer review", cls: "text-amber-300 bg-amber-500/15 border-amber-500/30" };
 
+const REPORT_LABELS = ["deer", "elephant", "leopard", "rhesus_monkey", "peacock", "rhino", "tiger", "wild_boar"] as const;
+
+type UploadClassificationResponse = {
+  ok: boolean;
+  labels: string[];
+  topLabel: string | null;
+  topConfidence: number | null;
+  detections: Array<{ label: string; confidence: number }>;
+  error?: string;
+  message?: string;
+};
+
+function prettyLabel(label: string) {
+  return label.replace(/_/g, " ");
+}
+
+function readFileAsDataUrl(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result ?? ""));
+    reader.onerror = () => reject(new Error("Failed to read file"));
+    reader.readAsDataURL(file);
+  });
+}
+
 export function CitizenApp() {
   const fn = useServerFn(getCitizenView);
   const submit = useServerFn(postCommunityReport);
@@ -38,16 +63,75 @@ export function CitizenApp() {
 
   const [tab, setTab] = useState<"home" | "report" | "reports">("home");
   const [form, setForm] = useState({
-    species: "Bengal Tiger",
+    species: "tiger",
     description: "",
     location: "Bardia · Sector 4",
-    hasImage: true,
   });
   const [busy, setBusy] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
+  const [imageFile, setImageFile] = useState<File | null>(null);
+  const [imageDataUrl, setImageDataUrl] = useState<string | null>(null);
+  const [imagePreviewUrl, setImagePreviewUrl] = useState<string | null>(null);
+  const [classification, setClassification] = useState<UploadClassificationResponse | null>(null);
+  const [classifying, setClassifying] = useState(false);
+  const [classificationError, setClassificationError] = useState<string | null>(null);
 
   const user = data?.user;
   const reports = data?.reports ?? [];
+
+  useEffect(() => {
+    return () => {
+      if (imagePreviewUrl) URL.revokeObjectURL(imagePreviewUrl);
+    };
+  }, [imagePreviewUrl]);
+
+  async function classifyImage(nextFile: File) {
+    setClassifying(true);
+    setClassificationError(null);
+    try {
+      const formData = new FormData();
+      formData.append("image", nextFile);
+      const response = await fetch("/api/classify-image", {
+        method: "POST",
+        body: formData,
+      });
+      const body = await response.json() as UploadClassificationResponse;
+      if (!response.ok || !body.ok) {
+        setClassification(null);
+        setClassificationError(body.error ?? body.message ?? "Could not classify image");
+        return;
+      }
+      setClassification(body);
+      if (body.topLabel) {
+        setForm(f => ({ ...f, species: body.topLabel ?? f.species }));
+      }
+    } catch {
+      setClassification(null);
+      setClassificationError("Could not classify image right now.");
+    } finally {
+      setClassifying(false);
+    }
+  }
+
+  async function onImageChange(file: File | null) {
+    setImageFile(file);
+    setImageDataUrl(null);
+    setClassification(null);
+    setClassificationError(null);
+
+    if (imagePreviewUrl) URL.revokeObjectURL(imagePreviewUrl);
+
+    if (!file) {
+      setImagePreviewUrl(null);
+      return;
+    }
+
+    const nextPreview = URL.createObjectURL(file);
+    setImagePreviewUrl(nextPreview);
+    const dataUrl = await readFileAsDataUrl(file);
+    setImageDataUrl(dataUrl);
+    void classifyImage(file);
+  }
 
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -55,9 +139,18 @@ export function CitizenApp() {
     const u = USERS.find(x => x.id === userId)!;
     setBusy(true);
     try {
-      await submit({ data: { ...form, userId, userName: u.name } });
+      await submit({ data: {
+        ...form,
+        hasImage: Boolean(imageFile),
+        imageDataUrl: imageDataUrl ?? undefined,
+        imageName: imageFile?.name,
+        imageMimeType: imageFile?.type,
+        userId,
+        userName: u.name,
+      } });
       setToast("Report sent. Awaiting forest officer review.");
-      setForm(f => ({ ...f, description: "" }));
+      setForm(f => ({ ...f, description: "", species: classification?.topLabel ?? f.species }));
+      onImageChange(null);
       qc.invalidateQueries({ queryKey: ["citizen", userId] });
       setTab("reports");
       setTimeout(() => setToast(null), 3500);
@@ -157,10 +250,71 @@ export function CitizenApp() {
 
           {tab === "report" && (
             <form onSubmit={onSubmit} className="space-y-3">
+              <div className="rounded-xl border border-border bg-secondary/35 p-3 space-y-3">
+                <div>
+                  <label className="text-[11px] uppercase tracking-wider text-muted-foreground">Attach photo</label>
+                  <input
+                    type="file"
+                    accept="image/png,image/jpeg,image/webp"
+                    onChange={e => { void onImageChange(e.target.files?.[0] ?? null); }}
+                    className="mt-1 block w-full text-xs file:mr-3 file:px-3 file:py-1.5 file:rounded-md file:border file:border-border file:bg-panel/80 file:text-foreground"
+                  />
+                </div>
+
+                <div className="grid grid-cols-1 gap-3 md:grid-cols-[1.1fr_0.9fr]">
+                  <div className="rounded-lg border border-border bg-panel/70 overflow-hidden min-h-[180px]">
+                    {imagePreviewUrl ? (
+                      <img src={imagePreviewUrl} alt="Upload preview" className="h-full w-full object-cover" />
+                    ) : (
+                      <div className="grid h-full min-h-[180px] place-items-center px-4 text-center text-xs text-muted-foreground">
+                        Upload a photo to classify it into the ForestGuard species labels.
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="rounded-lg border border-border bg-panel/70 p-3">
+                    <div className="text-[11px] uppercase tracking-wider text-muted-foreground">AI suggestion</div>
+                    <div className="mt-1 text-sm font-semibold">
+                      {classifying ? "Classifying image..." : classification?.topLabel ? prettyLabel(classification.topLabel) : "Waiting for upload"}
+                      {typeof classification?.topConfidence === "number" && (
+                        <span className="ml-2 text-xs font-mono text-primary">
+                          {Math.round(classification.topConfidence * 100)}%
+                        </span>
+                      )}
+                    </div>
+                    {classificationError && (
+                      <div className="mt-2 text-xs text-rose-300">{classificationError}</div>
+                    )}
+                    <div className="mt-3 grid grid-cols-1 gap-1.5">
+                      {(classification?.detections ?? []).slice(0, 4).map(item => (
+                        <div key={item.label} className="flex items-center justify-between rounded-md border border-border bg-secondary/30 px-2 py-1 text-xs">
+                          <span className="capitalize">{prettyLabel(item.label)}</span>
+                          <span className="font-mono text-primary">{Math.round(item.confidence * 100)}%</span>
+                        </div>
+                      ))}
+                      {classification && classification.detections.length === 0 && (
+                        <div className="text-xs text-muted-foreground">No matching wildlife label detected yet.</div>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              </div>
+
               <div>
                 <label className="text-[11px] uppercase tracking-wider text-muted-foreground">Species sighted</label>
-                <input className="mt-1 w-full bg-input border border-border rounded-lg h-10 px-3 text-sm"
-                  value={form.species} onChange={e => setForm(f => ({ ...f, species: e.target.value }))} required />
+                <select
+                  className="mt-1 w-full bg-input border border-border rounded-lg h-10 px-3 text-sm"
+                  value={form.species}
+                  onChange={e => setForm(f => ({ ...f, species: e.target.value }))}
+                  required
+                >
+                  {REPORT_LABELS.map(label => (
+                    <option key={label} value={label}>{prettyLabel(label)}</option>
+                  ))}
+                </select>
+                <div className="mt-1 text-[11px] text-muted-foreground">
+                  The uploaded image will suggest one of the 8 dashboard labels, and you can still adjust it before submitting.
+                </div>
               </div>
               <div>
                 <label className="text-[11px] uppercase tracking-wider text-muted-foreground">Where</label>
@@ -173,10 +327,6 @@ export function CitizenApp() {
                   placeholder="When, how many, behaviour, distance from village…"
                   value={form.description} onChange={e => setForm(f => ({ ...f, description: e.target.value }))} required />
               </div>
-              <label className="flex items-center gap-2 text-xs">
-                <input type="checkbox" checked={form.hasImage} onChange={e => setForm(f => ({ ...f, hasImage: e.target.checked }))} />
-                I attached a photo (boosts approval)
-              </label>
               <div className="text-[11px] text-muted-foreground rounded-md bg-secondary/40 border border-border p-2.5">
                 Honest reports build your trust score. Fake or unverifiable reports are penalised after officer review.
               </div>

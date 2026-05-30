@@ -6,9 +6,7 @@ const NAV = [
   { to: "/",            label: "Overview",    short: "OPS" },
   { to: "/live-camera", label: "Live Feed",   short: "LIV" },
   { to: "/cameras",     label: "Camera Grid", short: "CAM" },
-  { to: "/alerts",      label: "Alerts",      short: "ALR" },
   { to: "/community",   label: "Community",   short: "CMR" },
-  { to: "/about",       label: "System",      short: "SYS" },
 ] as const;
 
 export function AppShell() {

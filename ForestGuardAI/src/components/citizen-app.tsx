@@ -40,6 +40,15 @@ function prettyLabel(label: string) {
   return label.replace(/_/g, " ");
 }
 
+function readFileAsDataUrl(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result ?? ""));
+    reader.onerror = () => reject(new Error("Failed to read file"));
+    reader.readAsDataURL(file);
+  });
+}
+
 export function CitizenApp() {
   const fn = useServerFn(getCitizenView);
   const submit = useServerFn(postCommunityReport);
@@ -61,6 +70,7 @@ export function CitizenApp() {
   const [busy, setBusy] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
   const [imageFile, setImageFile] = useState<File | null>(null);
+  const [imageDataUrl, setImageDataUrl] = useState<string | null>(null);
   const [imagePreviewUrl, setImagePreviewUrl] = useState<string | null>(null);
   const [classification, setClassification] = useState<UploadClassificationResponse | null>(null);
   const [classifying, setClassifying] = useState(false);
@@ -103,8 +113,9 @@ export function CitizenApp() {
     }
   }
 
-  function onImageChange(file: File | null) {
+  async function onImageChange(file: File | null) {
     setImageFile(file);
+    setImageDataUrl(null);
     setClassification(null);
     setClassificationError(null);
 
@@ -117,6 +128,8 @@ export function CitizenApp() {
 
     const nextPreview = URL.createObjectURL(file);
     setImagePreviewUrl(nextPreview);
+    const dataUrl = await readFileAsDataUrl(file);
+    setImageDataUrl(dataUrl);
     void classifyImage(file);
   }
 
@@ -126,7 +139,15 @@ export function CitizenApp() {
     const u = USERS.find(x => x.id === userId)!;
     setBusy(true);
     try {
-      await submit({ data: { ...form, hasImage: Boolean(imageFile), userId, userName: u.name } });
+      await submit({ data: {
+        ...form,
+        hasImage: Boolean(imageFile),
+        imageDataUrl: imageDataUrl ?? undefined,
+        imageName: imageFile?.name,
+        imageMimeType: imageFile?.type,
+        userId,
+        userName: u.name,
+      } });
       setToast("Report sent. Awaiting forest officer review.");
       setForm(f => ({ ...f, description: "", species: classification?.topLabel ?? f.species }));
       onImageChange(null);
@@ -235,7 +256,7 @@ export function CitizenApp() {
                   <input
                     type="file"
                     accept="image/png,image/jpeg,image/webp"
-                    onChange={e => onImageChange(e.target.files?.[0] ?? null)}
+                    onChange={e => { void onImageChange(e.target.files?.[0] ?? null); }}
                     className="mt-1 block w-full text-xs file:mr-3 file:px-3 file:py-1.5 file:rounded-md file:border file:border-border file:bg-panel/80 file:text-foreground"
                   />
                 </div>

@@ -2,7 +2,7 @@ import "./lib/error-capture";
 
 import { consumeLastCapturedError } from "./lib/error-capture";
 import { renderErrorPage } from "./lib/error-page";
-import { ingestCameraData } from "./lib/forest-store.server";
+import { ingestCameraData, getStore } from "./lib/forest-store.server";
 
 type ServerEntry = {
   fetch: (request: Request, env: unknown, ctx: unknown) => Promise<Response> | Response;
@@ -403,6 +403,53 @@ async function handleClassifyImage(request: Request): Promise<Response> {
     }
   }
 }
+
+async function handleReportImageFile(request: Request): Promise<Response> {
+  if (request.method !== "GET") {
+    return new Response(JSON.stringify({ error: "Method not allowed" }), {
+      status: 405,
+      headers: { "Content-Type": "application/json" },
+    });
+  }
+
+  const [{ readFile, stat }, path] = await Promise.all([
+    import("node:fs/promises"),
+    import("node:path"),
+  ]);
+
+  const url = new URL(request.url);
+  const id = url.searchParams.get("id");
+  if (!id) return new Response("Missing report id", { status: 400 });
+
+  const report = getStore().reports.find((entry) => entry.id === id);
+  if (!report?.imageFileName) return new Response("Not found", { status: 404 });
+
+  const configured = typeof process !== "undefined" ? process.env?.REPORT_IMAGES_DIR : undefined;
+  const root = configured
+    ? path.resolve(configured)
+    : path.resolve(process.cwd(), "report_images");
+  const filePath = path.resolve(root, report.imageFileName);
+  const rootWithSep = root.endsWith(path.sep) ? root : `${root}${path.sep}`;
+  if (!filePath.startsWith(rootWithSep)) {
+    return new Response("Invalid image path", { status: 400 });
+  }
+
+  try {
+    const info = await stat(filePath);
+    if (!info.isFile()) return new Response("Not found", { status: 404 });
+    const bytes = await readFile(filePath);
+    const type = report.imageMimeType ?? (path.extname(filePath).toLowerCase() === ".png" ? "image/png" : path.extname(filePath).toLowerCase() === ".webp" ? "image/webp" : "image/jpeg");
+    return new Response(bytes, {
+      headers: {
+        "Content-Type": type,
+        "Cache-Control": "no-store",
+        "Access-Control-Allow-Origin": "*",
+      },
+    });
+  } catch {
+    return new Response("Not found", { status: 404 });
+  }
+}
 // ─────────────────────────────────────────────────────────────────────────────
 
 export default {
@@ -421,6 +468,9 @@ export default {
     }
     if (url.pathname === "/api/captured-images/file") {
       return handleCapturedImageFile(request);
+    }
+    if (url.pathname === "/api/report-images/file") {
+      return handleReportImageFile(request);
     }
     if (url.pathname === "/api/classify-image") {
       return handleClassifyImage(request);

@@ -112,8 +112,11 @@ export const postCommunityReport = createServerFn({ method: "POST" })
   .inputValidator((d: {
     userId: string; userName: string; species: string;
     description: string; location: string; hasImage: boolean;
+    imageDataUrl?: string;
+    imageName?: string;
+    imageMimeType?: string;
   }) => d)
-  .handler(async ({ data }) => verifyReport(data));
+  .handler(async ({ data }) => await verifyReport(data));
 
 export const reviewCommunityReport = createServerFn({ method: "POST" })
   .inputValidator((d: { id: string; decision: "approve" | "reject"; officialName?: string }) => d)

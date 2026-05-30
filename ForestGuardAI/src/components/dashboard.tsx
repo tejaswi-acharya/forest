@@ -349,6 +349,12 @@ export function StatsRow() {
   const reviewed = community?.reviewed ?? [];
   const payoutPoints = reviewed.filter(r => r.reviewStatus === "approved")
     .reduce((sum, r) => sum + r.pointsAwarded, 0);
+  const [selectedImage, setSelectedImage] = useState<{ src: string; title: string } | null>(null);
+
+  function openImage(src?: string, title?: string) {
+    if (!src) return;
+    setSelectedImage({ src, title: title ?? "Submitted photo" });
+  }
 
   return (
     <div className="space-y-3">
@@ -624,9 +630,33 @@ export function StatsRow() {
                 <div className="space-y-2">
                   {pending.slice(0, 5).map(r => (
                     <div key={r.id} className="rounded-md border border-border bg-secondary/40 px-3 py-2 flex items-center justify-between gap-3">
-                      <div className="min-w-0">
-                        <div className="text-sm font-medium truncate">{r.species}</div>
-                        <div className="text-[11px] font-mono text-muted-foreground truncate">{r.userName} · {r.location}</div>
+                      <div className="min-w-0 flex items-center gap-3">
+                        {r.hasImage && (r.imageUrl ?? r.imageDataUrl) ? (
+                          <button
+                            type="button"
+                            onClick={() => openImage(r.imageUrl ?? r.imageDataUrl, `${r.userName} · ${r.species}`)}
+                            className="relative size-14 overflow-hidden rounded-md border border-border bg-black/20 shrink-0"
+                          >
+                            <img src={r.imageUrl ?? r.imageDataUrl} alt={`${r.species} submission`} className="h-full w-full object-cover" />
+                          </button>
+                        ) : (
+                          <div className="size-14 rounded-md border border-border bg-panel/60 grid place-items-center text-[10px] font-mono text-muted-foreground shrink-0">
+                            no photo
+                          </div>
+                        )}
+                        <div className="min-w-0">
+                          <div className="text-sm font-medium truncate">{r.species}</div>
+                          <div className="text-[11px] font-mono text-muted-foreground truncate">{r.userName} · {r.location}</div>
+                          {r.hasImage && (r.imageUrl ?? r.imageDataUrl) && (
+                            <button
+                              type="button"
+                              onClick={() => openImage(r.imageUrl ?? r.imageDataUrl, `${r.userName} · ${r.species}`)}
+                              className="mt-1 text-[10px] font-mono text-primary hover:underline"
+                            >
+                              View submitted photo
+                            </button>
+                          )}
+                        </div>
                       </div>
                       <span className={`text-[10px] uppercase font-mono px-1.5 py-0.5 rounded border ${
                         r.status === "likely_real" ? "border-primary/40 bg-primary/10 text-primary" :
@@ -641,6 +671,29 @@ export function StatsRow() {
               )}
             </div>
           )}
+        </div>
+      )}
+
+      {selectedImage && (
+        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4" onClick={() => setSelectedImage(null)}>
+          <div className="max-w-4xl w-full rounded-xl border border-border bg-panel shadow-2xl overflow-hidden" onClick={e => e.stopPropagation()}>
+            <div className="flex items-center justify-between gap-3 px-4 py-3 border-b border-border">
+              <div className="min-w-0">
+                <div className="text-sm font-semibold truncate">{selectedImage.title}</div>
+                <div className="text-[11px] text-muted-foreground">Submitted photo</div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setSelectedImage(null)}
+                className="text-[11px] font-mono px-2 py-1 rounded border border-border bg-secondary/60"
+              >
+                Close
+              </button>
+            </div>
+            <div className="bg-black">
+              <img src={selectedImage.src} alt={selectedImage.title} className="max-h-[78vh] w-full object-contain" />
+            </div>
+          </div>
         </div>
       )}
     </div>

@@ -60,6 +60,137 @@ function formatImageTime(iso?: string) {
   });
 }
 
+type UploadClassificationResponse = {
+  ok: boolean;
+  labels: string[];
+  topLabel: string | null;
+  topConfidence: number | null;
+  detections: Array<{ label: string; confidence: number }>;
+  error?: string;
+  message?: string;
+};
+
+function prettySpeciesName(label: string) {
+  return label.replace(/_/g, " ");
+}
+
+export function UploadClassifierPanel() {
+  const [file, setFile] = useState<File | null>(null);
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [result, setResult] = useState<UploadClassificationResponse | null>(null);
+
+  const onChooseFile = (nextFile: File | null) => {
+    setFile(nextFile);
+    setResult(null);
+    setError(null);
+    if (previewUrl) URL.revokeObjectURL(previewUrl);
+    if (nextFile) setPreviewUrl(URL.createObjectURL(nextFile));
+    else setPreviewUrl(null);
+  };
+
+  const classify = async () => {
+    if (!file) return;
+    setLoading(true);
+    setError(null);
+    setResult(null);
+    try {
+      const formData = new FormData();
+      formData.append("image", file);
+      const response = await fetch("/api/classify-image", {
+        method: "POST",
+        body: formData,
+      });
+      const body = await response.json() as UploadClassificationResponse;
+      if (!response.ok || !body.ok) {
+        setError(body.error ?? body.message ?? "Classification failed");
+        return;
+      }
+      setResult(body);
+    } catch {
+      setError("Could not classify image. Make sure the Python environment is ready.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="panel overflow-hidden">
+      <div className="px-4 py-3 border-b border-border">
+        <h3 className="text-sm font-semibold">Upload & Classify (best.pt)</h3>
+        <p className="text-[11px] text-muted-foreground mt-0.5">
+          Upload an image and run the same fine-tuned YOLO model to classify into 8 wildlife labels.
+        </p>
+      </div>
+
+      <div className="p-4 grid grid-cols-1 lg:grid-cols-2 gap-4">
+        <div className="space-y-3">
+          <input
+            type="file"
+            accept="image/png,image/jpeg,image/webp"
+            onChange={(event) => onChooseFile(event.target.files?.[0] ?? null)}
+            className="block w-full text-xs file:mr-3 file:px-3 file:py-1.5 file:rounded-md file:border file:border-border file:bg-secondary/70 file:text-foreground"
+          />
+          <button
+            type="button"
+            disabled={!file || loading}
+            onClick={classify}
+            className="text-[11px] font-mono px-3 py-1.5 rounded-md border border-primary/40 bg-primary/15 text-primary disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            {loading ? "Classifying..." : "Run YOLO Classification"}
+          </button>
+          {error && <div className="text-xs text-critical-foreground">{error}</div>}
+
+          <div className="text-[11px] text-muted-foreground">
+            Labels: deer, elephant, leopard, rhesus_monkey, peacock, rhino, tiger, wild_boar
+          </div>
+        </div>
+
+        <div className="rounded-lg border border-border bg-secondary/20 overflow-hidden min-h-[220px]">
+          {previewUrl ? (
+            <img src={previewUrl} alt="Upload preview" className="w-full h-full object-cover" />
+          ) : (
+            <div className="h-full min-h-[220px] grid place-items-center text-xs text-muted-foreground">
+              Image preview appears here
+            </div>
+          )}
+        </div>
+      </div>
+
+      {result && (
+        <div className="px-4 pb-4">
+          <div className="rounded-md border border-border bg-secondary/20 p-3 space-y-2">
+            <div className="text-xs text-muted-foreground">Top prediction</div>
+            <div className="text-sm font-semibold capitalize">
+              {result.topLabel ? prettySpeciesName(result.topLabel) : "No target species detected"}
+              {typeof result.topConfidence === "number" && (
+                <span className="ml-2 text-xs font-mono text-primary">
+                  {Math.round(result.topConfidence * 100)}%
+                </span>
+              )}
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+              {result.detections.map((detection) => (
+                <div
+                  key={detection.label}
+                  className="flex items-center justify-between rounded border border-border bg-panel/60 px-2 py-1 text-xs"
+                >
+                  <span className="capitalize">{prettySpeciesName(detection.label)}</span>
+                  <span className="font-mono text-primary">{Math.round(detection.confidence * 100)}%</span>
+                </div>
+              ))}
+              {result.detections.length === 0 && (
+                <div className="text-xs text-muted-foreground">No detections matched the 8 configured labels.</div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 type FeedPreset = {
   frame: number;
   label: string;

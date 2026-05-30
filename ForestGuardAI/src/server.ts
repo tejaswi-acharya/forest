@@ -304,6 +304,105 @@ async function handleCapturedImageFile(request: Request): Promise<Response> {
     return new Response("Not found", { status: 404 });
   }
 }
+
+async function handleClassifyImage(request: Request): Promise<Response> {
+  const json = (body: unknown, status = 200) =>
+    new Response(JSON.stringify(body), {
+      status,
+      headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" },
+    });
+
+  if (request.method === "OPTIONS") {
+    return new Response(null, {
+      status: 204,
+      headers: {
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Methods": "POST, OPTIONS",
+        "Access-Control-Allow-Headers": "Content-Type",
+      },
+    });
+  }
+
+  if (request.method !== "POST") return json({ error: "Method not allowed" }, 405);
+
+  let tempDir: string | null = null;
+  let fsPromises: typeof import("node:fs/promises") | null = null;
+
+  try {
+    const form = await request.formData();
+    const file = form.get("image");
+    if (!(file instanceof File)) {
+      return json({ error: "Missing image file" }, 400);
+    }
+
+    const lowerName = file.name.toLowerCase();
+    const ext = lowerName.endsWith(".png") ? ".png" : lowerName.endsWith(".webp") ? ".webp" : ".jpg";
+
+    const [fs, os, path, child] = await Promise.all([
+      import("node:fs/promises"),
+      import("node:os"),
+      import("node:path"),
+      import("node:child_process"),
+    ]);
+    fsPromises = fs;
+
+    tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "fg-upload-"));
+    const tempPath = path.join(tempDir, `upload${ext}`);
+    const bytes = Buffer.from(await file.arrayBuffer());
+    await fs.writeFile(tempPath, bytes);
+
+    const scriptPath = path.resolve(process.cwd(), "../android-agent/classify_upload.py");
+    const modelPath = path.resolve(process.cwd(), "ml/model/best.pt");
+    const pythonBin = process.env.PYTHON_BIN || "python";
+
+    const output = await new Promise<string>((resolve, reject) => {
+      const proc = child.spawn(pythonBin, [scriptPath, tempPath], {
+        cwd: path.resolve(process.cwd(), "../android-agent"),
+        env: {
+          ...process.env,
+          MODEL_PATH: modelPath,
+        },
+      });
+
+      let stdout = "";
+      let stderr = "";
+      proc.stdout.on("data", (chunk) => {
+        stdout += String(chunk);
+      });
+      proc.stderr.on("data", (chunk) => {
+        stderr += String(chunk);
+      });
+      proc.on("error", reject);
+      proc.on("close", (code) => {
+        if (code === 0) return resolve(stdout.trim());
+        reject(new Error(`classification_process_failed(${code}): ${stderr || stdout}`));
+      });
+    });
+
+    const parsed = JSON.parse(output) as {
+      ok: boolean;
+      labels: string[];
+      topLabel: string | null;
+      topConfidence: number | null;
+      detections: Array<{ label: string; confidence: number }>;
+      error?: string;
+      message?: string;
+    };
+
+    if (!parsed.ok) {
+      return json({ error: parsed.error ?? "classification_failed", message: parsed.message }, 500);
+    }
+
+    return json(parsed);
+  } catch (err) {
+    console.error("[/api/classify-image] error:", err);
+    return json({ error: "Unable to classify image" }, 500);
+  } finally {
+    if (tempDir && fsPromises) {
+      await fsPromises.rm(tempDir, { recursive: true, force: true }).catch(() => undefined);
+    }
+  }
+}
 // ─────────────────────────────────────────────────────────────────────────────
 
 export default {
@@ -322,6 +421,9 @@ export default {
     }
     if (url.pathname === "/api/captured-images/file") {
       return handleCapturedImageFile(request);
+    }
+    if (url.pathname === "/api/classify-image") {
+      return handleClassifyImage(request);
     }
 
     try {

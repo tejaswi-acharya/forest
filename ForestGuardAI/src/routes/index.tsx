@@ -1,5 +1,5 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { AlertsPanel, CameraGrid, EventsFeed, SpeciesHeatmap, StatsRow, ZoneMap } from "@/components/dashboard";
+import { AlertsPanel, CameraGrid, CapturedImagesGallery, EventsFeed, SpeciesHeatmap, StatsRow, ZoneMap } from "@/components/dashboard";
 
 export const Route = createFileRoute("/")({
   head: () => ({
@@ -21,12 +21,16 @@ function Overview() {
             Edge AI · Adaptive camera coordination · Community-assisted protection
           </p>
         </div>
-        <div className="text-[11px] font-mono text-muted-foreground border border-border rounded-md px-3 py-1.5 bg-panel/60">
-          THREAT LEVEL · <span className="text-warning">ELEVATED</span>
+        <div className="flex items-center gap-2 flex-wrap">
+          <div className="text-[11px] font-mono text-muted-foreground border border-border rounded-md px-3 py-1.5 bg-panel/60">
+            THREAT LEVEL · <span className="text-warning">ELEVATED</span>
+          </div>
         </div>
       </div>
 
       <StatsRow />
+
+      <CapturedImagesGallery />
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
         <div className="lg:col-span-2 space-y-4">

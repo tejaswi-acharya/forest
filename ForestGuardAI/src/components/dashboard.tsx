@@ -2,7 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
 import { useServerFn } from "@tanstack/react-start";
 import {
-  getDashboardSummary, getAlerts, getCameras, getRecentEvents, getCommunity, resolveAlert,
+  getDashboardSummary, getAlerts, getCameras, getRecentEvents, getCommunity, resolveAlert, getCapturedImages,
 } from "@/lib/forest.functions";
 
 export function StatCard({
@@ -48,6 +48,16 @@ function formatDuration(ms: number) {
   if (m < 60) return `${m}m`;
   const h = Math.round(m / 60);
   return `${h}h`;
+}
+
+function formatImageTime(iso?: string) {
+  if (!iso) return "Unknown time";
+  return new Date(iso).toLocaleString([], {
+    month: "short",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
 }
 
 type FeedPreset = {
@@ -505,6 +515,98 @@ export function StatsRow() {
     </div>
   );
 }
+
+type CapturedImage = {
+  id: string;
+  species: string;
+  filename: string;
+  url: string;
+  capturedAt?: string;
+  confidence?: number;
+};
+
+export function CapturedImagesGallery() {
+  const fn = useServerFn(getCapturedImages);
+  const { data, isLoading, isError } = useQuery({
+    queryKey: ["captured-images"],
+    queryFn: () => fn(),
+    refetchInterval: 7000,
+  });
+
+  const images = (data?.images ?? []) as CapturedImage[];
+
+  return (
+    <div className="panel overflow-hidden">
+      <div className="px-4 py-3 border-b border-border flex items-center justify-between gap-3 flex-wrap">
+        <div>
+          <h3 className="text-sm font-semibold">Captured Images</h3>
+          <p className="text-[11px] text-muted-foreground mt-0.5">
+            Latest files from the saved capture folder, loaded directly into the dashboard.
+          </p>
+        </div>
+        <span className="text-[11px] font-mono text-muted-foreground">
+          {data?.root ? `${images.length} saved` : "Folder not found"}
+        </span>
+      </div>
+
+      {isLoading && (
+        <div className="px-4 py-8 text-sm text-muted-foreground">Loading saved captures…</div>
+      )}
+
+      {isError && (
+        <div className="px-4 py-8 text-sm text-muted-foreground">
+          Unable to load saved captures right now.
+        </div>
+      )}
+
+      {!isLoading && !isError && images.length === 0 && (
+        <div className="px-4 py-8 text-sm text-muted-foreground">
+          No saved images were found in the capture folder yet.
+        </div>
+      )}
+
+      {images.length > 0 && (
+        <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-3 p-4">
+          {images.slice(0, 12).map(image => (
+            <a
+              key={image.id}
+              href={image.url}
+              target="_blank"
+              rel="noreferrer"
+              className="group rounded-lg border border-border bg-secondary/30 overflow-hidden hover:border-primary/40 hover:bg-secondary/50 transition-colors"
+            >
+              <div className="aspect-video bg-black/40 overflow-hidden">
+                <img
+                  src={`${image.url}&v=${encodeURIComponent(image.capturedAt ?? image.filename)}`}
+                  alt={`${image.species} capture`}
+                  className="h-full w-full object-cover transition-transform duration-300 group-hover:scale-[1.02]"
+                  loading="lazy"
+                />
+              </div>
+              <div className="p-3 space-y-1.5">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="text-sm font-medium capitalize truncate">{image.species.replace(/_/g, " ")}</div>
+                  {typeof image.confidence === "number" && (
+                    <span className="text-[10px] font-mono px-1.5 py-0.5 rounded border border-primary/30 bg-primary/10 text-primary">
+                      {image.confidence}%
+                    </span>
+                  )}
+                </div>
+                <div className="text-[11px] font-mono text-muted-foreground truncate">{image.filename}</div>
+                <div className="flex items-center justify-between gap-2 text-[11px] text-muted-foreground">
+                  <span>{formatImageTime(image.capturedAt)}</span>
+                  <span className="text-primary font-medium">Open</span>
+                </div>
+              </div>
+            </a>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+export const CapturedImagesPanel = CapturedImagesGallery;
 
 export function AlertsPanel({ limit = 8 }: { limit?: number }) {
   const fn = useServerFn(getAlerts);
